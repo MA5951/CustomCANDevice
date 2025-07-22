@@ -1,0 +1,25 @@
+
+Animation Type:
+0 - Off
+1 - Solid Color
+2 - Rainbow
+3 - Blinking
+4 - Wave Color Pattern
+5 - Smooth Wave 2 Color
+6 - Smooth Wave 3 Color
+7 - Breathing 2 Color
+8 - Breathing 3 Color
+9 - Evan Odd 2 Color
+10 - Wave Blink Pattern 
+
+
+
+Can Messages:
+
+Rio -> Led Controller
+	API ID 0x301 Animation Payload
+		Bytes - Type  -  Description
+		0 	uint8_t  Brightness Scalar
+		1	uint8_t  Animation Type
+		2 	uint8_t  Zones
+		
