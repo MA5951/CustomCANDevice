@@ -84,28 +84,6 @@ void smoothWaveColorPattern(int numColors, float period, float speed, uint8_t co
   strip.show();
 }
 
-// ---------- Example wave pattern ----------
-void chargedPattern(uint8_t c1[3], uint8_t c2[3]) {
-  for (int i = 0; i < LED_COUNT; i++) {
-    if (i < activeLedCount) {
-      if (i < 53) {
-        strip.setPixelColor(i, strip.Color(c1[0], c1[1], c1[2]));
-      } else if (i < 76) {
-        strip.setPixelColor(i, strip.Color(c2[0], c2[1], c2[2]));
-      } else if (i < 129) {
-        strip.setPixelColor(i, strip.Color(c1[0], c1[1], c1[2]));
-      } else if (i < 152) {
-        strip.setPixelColor(i, strip.Color(c2[0], c2[1], c2[2]));
-      } else {
-        strip.setPixelColor(i, 0);  // Rest off
-      }
-    } else {
-      strip.setPixelColor(i, 0);    // Off outside range
-    }
-  }
-  strip.show();
-}
-
 // ---------- Setup and Loop ----------
 void setup() {
   strip.begin();
@@ -117,13 +95,5 @@ void setup() {
 }
 
 void loop() {
-  setActiveLedCount(50); // Only 50 LEDs used
-  rainbowColorPattern(); // Applies the pattern only to the first 50 LEDs
-
-  delay(1000);
-
-  setActiveLedCount(200); // Now 200 LEDs are used
-  rainbowColorPattern();
-
-  delay(1000);
+  
 }
