@@ -1,6 +1,10 @@
 #include <Wire.h>
-#include <Adafruit_VL53L0X.h>
+#include <VL53L0X.h>          // Pololu library
 #include "driver/twai.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
 
 // ---------- I2C (ESP32-C3 Super Mini) ----------
 #define SDA_PIN   8
@@ -15,11 +19,11 @@
 #define ADDR_B    0x31
 
 // ---------- CAN (TWAI) config ----------
-#define CAN_TX_GPIO GPIO_NUM_21   // ESP32-C3 Super Mini: TXD on GPIO 21
-#define CAN_RX_GPIO GPIO_NUM_20   // ESP32-C3 Super Mini: RXD on GPIO 20
+#define CAN_TX_GPIO GPIO_NUM_21
+#define CAN_RX_GPIO GPIO_NUM_20
 #define CAN_RATE    TWAI_TIMING_CONFIG_1MBITS()
 
-// Compose a CTRE/WPILib-style SPID (extended identifier)
+// ---- CAN ID compose (CTRE/WPILib-style SPID) ----
 static inline uint32_t makeCANSPID(uint8_t deviceID, uint8_t manufacturerID, uint16_t apiID, uint8_t deviceNumber) {
   return ((uint32_t)(deviceID) << 24) | ((uint32_t)(manufacturerID) << 16) |
          ((uint32_t)(apiID & 0x3FF) << 6) | (deviceNumber & 0x3F);
@@ -31,40 +35,162 @@ static inline uint32_t makeCANSPID(uint8_t deviceID, uint8_t manufacturerID, uin
 #define SENSOR_BASE_API  0x0301
 #define DEVICE_NUMBER    30
 
-Adafruit_VL53L0X loxA;
-Adafruit_VL53L0X loxB;
+// ---------- Helpers ----------
+static inline void u16_to_le(uint16_t v, uint8_t* p) { p[0] = v & 0xFF; p[1] = (v >> 8) & 0xFF; }
 
-// Helper: power up one sensor at 0x29, configure, then readdress to newAddr
-void bringUpAndReaddress(int xshutPin, Adafruit_VL53L0X& sensor, uint8_t newAddr) {
+// ---------- Globals ----------
+VL53L0X loxA;
+VL53L0X loxB;
+
+static SemaphoreHandle_t g_i2cMutex;
+
+// latest values shared to CAN task
+typedef struct {
+  uint16_t dist_mm;   // 0..65534 valid, 0xFFFF invalid
+  uint8_t  status;    // 0 = valid; Pololu exposes timeoutOccurred() separately
+  uint64_t t_us;      // timestamp when captured
+} Sample;
+
+static volatile Sample sA = {0xFFFF, 0xFF, 0};
+static volatile Sample sB = {0xFFFF, 0xFF, 0};
+
+static TaskHandle_t g_canTaskHandle = nullptr;
+
+// ---------- Bring-up & readdress (Pololu) ----------
+static void bringUpAndReaddress(int xshutPin, VL53L0X& sensor, uint8_t newAddr) {
   pinMode(xshutPin, OUTPUT);
   digitalWrite(xshutPin, LOW);
-  delay(2);
+  vTaskDelay(pdMS_TO_TICKS(2));
   digitalWrite(xshutPin, HIGH);
-  delay(10); // boot
+  vTaskDelay(pdMS_TO_TICKS(10)); // boot
 
-  if (!sensor.begin(0x29, false, &Wire)) {
-    Serial.println(F("ERROR: begin() failed at 0x29 (check wiring/power)"));
-    while (true) delay(100);
+  xSemaphoreTake(g_i2cMutex, portMAX_DELAY);
+  sensor.setTimeout(50);         // ms safety
+  if (!sensor.init()) {
+    xSemaphoreGive(g_i2cMutex);
+    Serial.println(F("ERROR: VL53L0X init() failed (check wiring/power)"));
+    while (true) vTaskDelay(pdMS_TO_TICKS(100));
   }
 
-  // For 50 Hz, prefer HIGH_SPEED (short timing budget)
-  sensor.configSensor(Adafruit_VL53L0X::VL53L0X_SENSE_HIGH_SPEED);
+  // High-speed timing budget ~20,000 us (≈50 Hz continuous potential)
+  sensor.setMeasurementTimingBudget(20000); // in microseconds
 
+  // Assign new I2C address
   sensor.setAddress(newAddr);
-  delay(5);
+  xSemaphoreGive(g_i2cMutex);
+  vTaskDelay(pdMS_TO_TICKS(2));
 }
 
-static inline void u16_to_le(uint16_t v, uint8_t* p) {
-  p[0] = (uint8_t)(v & 0xFF);
-  p[1] = (uint8_t)((v >> 8) & 0xFF);
+// ---------- Sensor tasks (continuous mode) ----------
+static void TaskSensor(void* arg) {
+  const bool isA = (bool)arg;
+  VL53L0X* s = isA ? &loxA : &loxB;
+
+  // Stagger one sensor to reduce IR cross-talk
+  if (!isA) vTaskDelay(pdMS_TO_TICKS(10));
+
+  // Start back-to-back continuous (period=0 => relies purely on timing budget)
+  xSemaphoreTake(g_i2cMutex, portMAX_DELAY);
+  s->startContinuous(0);
+  xSemaphoreGive(g_i2cMutex);
+
+  // Poll quickly for new distance; each read is a short I2C transaction
+  uint16_t last_mm = 0xFFFF;
+
+  for (;;) {
+    uint16_t d;
+    bool timeout = false;
+
+    xSemaphoreTake(g_i2cMutex, portMAX_DELAY);
+    d = s->readRangeContinuousMillimeters(); // gets latest sample
+    timeout = s->timeoutOccurred();
+    xSemaphoreGive(g_i2cMutex);
+
+    uint8_t st = 0; // 0 = ok
+    if (timeout) { st = 1; d = 0xFFFF; }
+
+    // Only signal CAN when value actually updated (optional, reduces spam)
+    if (d != last_mm || timeout) {
+      uint64_t now = (uint64_t)esp_timer_get_time();
+      if (isA) {
+        sA.dist_mm = (d <= 65534u) ? d : (uint16_t)65534u;
+        sA.status  = st;
+        sA.t_us    = now;
+      } else {
+        sB.dist_mm = (d <= 65534u) ? d : (uint16_t)65534u;
+        sB.status  = st;
+        sB.t_us    = now;
+      }
+      last_mm = d;
+
+      if (g_canTaskHandle) {
+        xTaskNotifyGive(g_canTaskHandle); // wake CAN task
+      }
+    }
+
+    // Budget is ~20 ms; reading faster than that returns "latest".
+    // Sleep a tick so we don't hog CPU if nothing new.
+    vTaskDelay(pdMS_TO_TICKS(1));
+  }
 }
 
+// ---------- CAN TX + printing task ----------
+static void TaskCAN(void* arg) {
+  (void)arg;
+  uint64_t last_us = esp_timer_get_time();
+
+  for (;;) {
+    // Wait for any sensor update
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+    // Snapshot
+    Sample a = { (uint16_t)sA.dist_mm, (uint8_t)sA.status, (uint64_t)sA.t_us };
+    Sample b = { (uint16_t)sB.dist_mm, (uint8_t)sB.status, (uint64_t)sB.t_us };
+
+    // Pack CAN frame (A:2+1, B:2+1)
+    twai_message_t msg = {};
+    msg.identifier = makeCANSPID(DEVICE_ID, MANUFACTURER_ID, SENSOR_BASE_API, DEVICE_NUMBER);
+    msg.extd = 1;
+    msg.data_length_code = 6;
+    u16_to_le(a.dist_mm, &msg.data[0]);  msg.data[2] = a.status;
+    u16_to_le(b.dist_mm, &msg.data[3]);  msg.data[5] = b.status;
+
+    // Non-blocking-ish transmit; drop if bus busy to keep latency tiny
+    (void)twai_transmit(&msg, pdMS_TO_TICKS(1));
+
+    // ---- PRINT sensors data (concise) ----
+    uint64_t now_us = esp_timer_get_time();
+    uint32_t dt_ms  = (uint32_t)((now_us - last_us) / 1000);
+    last_us = now_us;
+
+    uint32_t ageA_ms = (uint32_t)((now_us - a.t_us) / 1000);
+    uint32_t ageB_ms = (uint32_t)((now_us - b.t_us) / 1000);
+
+    //Serial.print("Δt="); Serial.print(dt_ms); Serial.print("ms | A: ");
+    // if (a.status == 0 && a.dist_mm != 0xFFFF) {// Serial.println(a.dist_mm);
+    //  }
+    // else { Serial.print("INV"); }
+    // Serial.print(" (S="); Serial.print(a.status); Serial.print(", age=");
+    // Serial.print(ageA_ms); Serial.print("ms)");
+
+    // Serial.print(" | B: ");
+    // if (b.status == 0 && b.dist_mm != 0xFFFF) { Serial.println(b.dist_mm);
+    // }
+    // else { ///Serial.print("INV");
+    // }
+    // Serial.print(" (S="); Serial.print(b.status); Serial.print(", age=");
+    // Serial.print(ageB_ms); Serial.print("ms)");
+    // Serial.println();
+  }
+}
+
+// ---------- Setup ----------
 void setup() {
   Serial.begin(115200);
   unsigned long t0 = millis();
-  while (!Serial && millis() - t0 < 1500) { } // brief wait for CDC
+  while (!Serial && millis() - t0 < 1500) {}
 
-  // I2C on custom pins @ 400 kHz
+  // I2C @ 400 kHz
   Wire.begin(SDA_PIN, SCL_PIN, 400000);
 
   // Hold both sensors off-bus
@@ -72,81 +198,40 @@ void setup() {
   pinMode(XSHUT_B, OUTPUT);
   digitalWrite(XSHUT_A, LOW);
   digitalWrite(XSHUT_B, LOW);
-  delay(10);
+  vTaskDelay(pdMS_TO_TICKS(10));
 
-  // Bring up and readdress
+  // Mutex for I2C
+  g_i2cMutex = xSemaphoreCreateMutex();
+  configASSERT(g_i2cMutex != NULL);
+
+  // Bring up & readdress using Pololu API
   bringUpAndReaddress(XSHUT_A, loxA, ADDR_A);
   bringUpAndReaddress(XSHUT_B, loxB, ADDR_B);
-  Serial.println(F("Two VL53L0X sensors ready at 0x30 and 0x31"));
+  Serial.println(F("VL53L0X (Pololu) at 0x30 and 0x31, continuous mode planned."));
 
-  // ---- TWAI (CAN) init ----
+  // TWAI init
   twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX_GPIO, CAN_RX_GPIO, TWAI_MODE_NORMAL);
-  twai_timing_config_t  t_config = CAN_RATE; // 1 Mbps
+  twai_timing_config_t  t_config = CAN_RATE;
   twai_filter_config_t  f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
-  if (twai_driver_install(&g_config, &t_config, &f_config) == ESP_OK) {
-    Serial.println(F("TWAI driver installed"));
-  } else {
+  if (twai_driver_install(&g_config, &t_config, &f_config) != ESP_OK) {
     Serial.println(F("TWAI driver install FAILED"));
-    while (true) delay(1000);
+    while (true) vTaskDelay(pdMS_TO_TICKS(1000));
   }
-  if (twai_start() == ESP_OK) {
-    Serial.println(F("TWAI started"));
-  } else {
+  if (twai_start() != ESP_OK) {
     Serial.println(F("TWAI start FAILED"));
-    while (true) delay(1000);
+    while (true) vTaskDelay(pdMS_TO_TICKS(1000));
   }
-}
+  Serial.println(F("TWAI started @ 1Mbps"));
 
-void readSensor(Adafruit_VL53L0X& sensor, uint16_t& dist_mm, uint8_t& status) {
-  VL53L0X_RangingMeasurementData_t m;
-  sensor.rangingTest(&m, false);  // single-shot
-  status = m.RangeStatus;         // 0 = valid
-  if (status == 0) {
-    dist_mm = (uint16_t)m.RangeMilliMeter;
-  } else {
-    dist_mm = -1; // encode 0 on invalid frames
-  }
+  // Tasks
+  configASSERT(xTaskCreatePinnedToCore(TaskSensor, "SensorA", 4096, (void*)true,  6, NULL, tskNO_AFFINITY) == pdPASS);
+  configASSERT(xTaskCreatePinnedToCore(TaskSensor, "SensorB", 4096, (void*)false, 6, NULL, tskNO_AFFINITY) == pdPASS);
+  configASSERT(xTaskCreatePinnedToCore(TaskCAN,    "CAN-TX",  4096, NULL,         5, &g_canTaskHandle, tskNO_AFFINITY) == pdPASS);
+
+  Serial.println(F("Mode: CONTINUOUS (Pololu). Timing budget 20 ms. Expect ~100 Hz CAN frames (alt A/B ~10 ms)."));
 }
 
 void loop() {
-  static uint32_t last = 0;
-  const uint32_t period_ms = 20; // 50 Hz
-
-  uint32_t now = millis();
-  if ((now - last) < period_ms) return;
-  last = now;
-
-  // Read A then B with a small stagger to reduce cross-talk
-  uint16_t a_mm = 0, b_mm = 0;
-  uint8_t  a_stat = 0xFF, b_stat = 0xFF;
-
-  readSensor(loxA, a_mm, a_stat);
-  delay(10);
-  readSensor(loxB, b_mm, b_stat);
-
-  // Pack CAN frame
-  twai_message_t msg = {};
-  msg.identifier = makeCANSPID(DEVICE_ID, MANUFACTURER_ID, SENSOR_BASE_API, DEVICE_NUMBER);
-  msg.extd = 1;                 // extended ID
-  msg.data_length_code = 6;     // A:2+1, B:2+1 = 6 bytes
-
-  u16_to_le(a_mm, &msg.data[0]);  // bytes 1-2: A distance (LE)
-  msg.data[2] = a_stat;           // byte 3:    A result/status
-  u16_to_le(b_mm, &msg.data[3]);  // bytes 4-5: B distance (LE)
-  msg.data[5] = b_stat;           // byte 6:    B result/status
-
-  esp_err_t res = twai_transmit(&msg, pdMS_TO_TICKS(5));
-  if (res != ESP_OK) {
-    // Optional debug print; keep it lightweight at 50 Hz
-    Serial.printf("CAN tx fail: %d\n", res);
-  }
-
-  // (Optional) serial monitor for quick sanity
-  // Comment out if you need absolutely steady 50 Hz
-  // Serial.print("A: ");
-  // if (a_stat == 0) { Serial.print(a_mm); Serial.print("mm"); } else { Serial.print("S="); Serial.print(a_stat); }
-  // Serial.print(" | B: ");
-  // if (b_stat == 0) { Serial.print(b_mm); Serial.print("mm"); } else { Serial.print("S="); Serial.print(b_stat); }
-  // Serial.println();
+  // RTOS takes it from here
 }
