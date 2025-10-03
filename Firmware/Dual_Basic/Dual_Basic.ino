@@ -167,7 +167,7 @@ static void TaskCAN(void* arg) {
     uint32_t ageB_ms = (uint32_t)((now_us - b.t_us) / 1000);
 
     //Serial.print("Δt="); Serial.print(dt_ms); Serial.print("ms | A: ");
-    // if (a.status == 0 && a.dist_mm != 0xFFFF) {// Serial.println(a.dist_mm);
+    // if (a.status == 0 && a.dist_mm != 0xFFFF) { Serial.println(a.dist_mm);
     //  }
     // else { Serial.print("INV"); }
     // Serial.print(" (S="); Serial.print(a.status); Serial.print(", age=");
