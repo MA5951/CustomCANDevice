@@ -29,7 +29,7 @@ static inline uint32_t makeCANSPID(uint8_t deviceID, uint8_t manufacturerID, uin
 #define DEVICE_ID        0x0A
 #define MANUFACTURER_ID  0x08
 #define SENSOR_BASE_API  0x0301
-#define DEVICE_NUMBER    50
+#define DEVICE_NUMBER    30
 
 Adafruit_VL53L0X loxA;
 Adafruit_VL53L0X loxB;
@@ -105,7 +105,7 @@ void readSensor(Adafruit_VL53L0X& sensor, uint16_t& dist_mm, uint8_t& status) {
   if (status == 0) {
     dist_mm = (uint16_t)m.RangeMilliMeter;
   } else {
-    dist_mm = 0; // encode 0 on invalid frames
+    dist_mm = -1; // encode 0 on invalid frames
   }
 }
 
