@@ -37,8 +37,8 @@ void setup() {
   //sensor.setROISize(8, 8);
   //sensor.setROICenter(199);
   sensor.setDistanceMode(VL53L1X::Short);
-  sensor.setMeasurementTimingBudget(7000); // 7 ms budget
-  sensor.startContinuous(7);               // ask for ~100 Hz
+  sensor.setMeasurementTimingBudget(8000); // 7 ms budget
+  sensor.startContinuous(8);               // ask for ~100 Hz
 
   lastTime = millis();
   Serial.println("VL53L1X started in short 100 Hz mode (showing Δt).");
