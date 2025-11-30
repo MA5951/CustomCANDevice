@@ -1,6 +1,7 @@
 #include <Wire.h>
 #include <VL53L1X.h>
 #include <Adafruit_NeoPixel.h>
+#include "driver/twai.h"
 
 VL53L1X sensor;
 
@@ -15,11 +16,36 @@ unsigned long lastTime = 0;  // ms
 unsigned long currentTime = 0;
 unsigned long deltaTime = 0;
 
+#define DEVICE_ID 0x0A
+#define MANUFACTURER_ID 0x08
+#define DEVICE_NUMBER 50
+#define SENSOR_BASE_API_ID 0x0301
+
 void setup() {
   Serial.begin(115200);
 
   // I2C for ESP32-C3 Super Mini (you used 8,9) 
   Wire.begin(8, 9, 400000); // SDA=8, SCL=9 at 400kHz
+
+  twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(GPIO_NUM_21, GPIO_NUM_20, TWAI_MODE_NORMAL);
+  twai_timing_config_t t_config = TWAI_TIMING_CONFIG_1MBITS();
+  twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+
+  if (twai_driver_install(&g_config, &t_config, &f_config) == ESP_OK) {
+    Serial.println("Driver installed");
+  } else {
+    Serial.println("Failed to install driver");
+    return; 
+  }
+
+  if (twai_start() == ESP_OK) {
+    Serial.println("Driver started");
+  } else {
+    Serial.println("Failed to start driver");
+    return;
+  }
+
+
 
   // init LED
   pixel.begin();
@@ -37,8 +63,8 @@ void setup() {
   //sensor.setROISize(8, 8);
   //sensor.setROICenter(199);
   sensor.setDistanceMode(VL53L1X::Short);
-  sensor.setMeasurementTimingBudget(8000); // 7 ms budget
-  sensor.startContinuous(8);               // ask for ~100 Hz
+  sensor.setMeasurementTimingBudget(10000); // 7 ms budget
+  sensor.startContinuous(10);               // ask for ~100 Hz
 
   lastTime = millis();
   Serial.println("VL53L1X started in short 100 Hz mode (showing Δt).");
@@ -69,5 +95,27 @@ void loop() {
   }
   pixel.show();
 
+  twai_message_t msg1 = {};
+  msg1.identifier = makeCANSPID(DEVICE_ID, MANUFACTURER_ID, SENSOR_BASE_API_ID, DEVICE_NUMBER);
+  msg1.extd = 1;
+  msg1.data_length_code = 2;
+
+
+    msg1.data[0] = distance & 0xFF;  
+    msg1.data[1] = (distance >> 8) & 0xFF;
+  
+
+  esp_err_t result = twai_transmit(&msg1, pdMS_TO_TICKS(10));
+
+  // if (result == ESP_OK) {
+  //   Serial.println("Ok");
+  // } else {
+  //   Serial.printf("Transmit failed: %d\n", result);
+  // }
+
   // no delay – sensor is running continuous
+}
+
+uint32_t makeCANSPID(uint8_t deviceID, uint8_t manufacturerID, uint16_t apiID, uint8_t deviceNumber) {
+  return ((uint32_t)(deviceID) << 24) | ((uint32_t)(manufacturerID) << 16) | ((uint32_t)(apiID & 0x3FF) << 6) | (deviceNumber & 0x3F);
 }
