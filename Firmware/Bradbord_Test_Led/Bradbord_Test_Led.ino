@@ -117,7 +117,7 @@ void loop() {
     msg1.data[1] = (50 >> 8) & 0xFF;
   
 
-  esp_err_t result = twai_transmit(&msg1, pdMS_TO_TICKS(10));
+  esp_err_t result = twai_transmit(&msg1, pdMS_TO_TICKS(30));
 
   if (result == ESP_OK) {
     Serial.println("Ok");
@@ -125,6 +125,15 @@ void loop() {
     pixel.show();
   } else {
     Serial.printf("Transmit failed: %d\n", result);
+    twai_status_info_t status;
+twai_get_status_info(&status);
+
+Serial.printf("State: %d, tx_err: %d, rx_err: %d, tx_q: %d, rx_q: %d\n",
+              status.state,
+              status.tx_error_counter,
+              status.rx_error_counter,
+              status.msgs_to_tx,
+              status.msgs_to_rx);
     pixel.setPixelColor(0, pixel.Color(255, 0, 0));
     pixel.show();
   }
