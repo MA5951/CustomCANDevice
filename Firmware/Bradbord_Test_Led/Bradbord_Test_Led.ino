@@ -83,7 +83,7 @@ void TaskCANTx(void* pvParams) {
     xSemaphoreTake(sensorMutex, portMAX_DELAY);
     for (int i = 0; i < NUM_SENSORS; i++) {
       int dist = sensorDistances[i];
-      uint32_t tb = sensors[i].getMeasurementTimingBudget();
+      uint32_t status = ssensors[i].ranging_data.range_status;
 
       uint8_t roiX = 0, roiY = 0;
       sensors[i].getROISize(&roiX, &roiY);
@@ -99,8 +99,7 @@ void TaskCANTx(void* pvParams) {
       msg.data[3] = sensors[i].getROICenter();      // ROI center
       msg.data[4] = roiX;                           // ROI width
       msg.data[5] = roiY;                           // ROI height
-      msg.data[6] = (tb >> 8) & 0xFF;               // Timing budget high byte
-      msg.data[7] = tb & 0xFF;                      // Timing budget low byte
+      msg.data[6] = status;               //Status
 
       twai_transmit(&msg, pdMS_TO_TICKS(1));
     }
