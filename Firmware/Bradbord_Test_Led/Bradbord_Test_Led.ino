@@ -23,7 +23,7 @@ const uint8_t roiY[NUM_SENSORS] = {8};  // ROI height for each sensor
 const uint8_t roiCenters[NUM_SENSORS] = {199};
 const uint32_t timingBudgets[NUM_SENSORS] = {10000};
 const VL53L1X::DistanceMode rangingModes[NUM_SENSORS] = {
-  VL53L1X::Short
+  VL53L1X::Medium
 };
 
 SemaphoreHandle_t sensorMutex;
