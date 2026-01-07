@@ -9,19 +9,19 @@
 #define SCL_PIN 9
 #define NUM_SENSORS 1
 
-#define DEVICE_ID        0x0A
-#define MANUFACTURER_ID  0x08
-#define DEVICE_NUMBER    25
+#define DEVICE_ID 0x0A
+#define MANUFACTURER_ID 0x08
+#define DEVICE_NUMBER 25
 #define SENSOR_BASE_API_ID 0x0301
 #define SENSOR_CONFIG_API_ID 0x0305
 
 VL53L1X sensors[NUM_SENSORS];
 int sensorDistances[NUM_SENSORS];
 
-const uint8_t roiX[NUM_SENSORS] = {8};  // ROI width for each sensor
-const uint8_t roiY[NUM_SENSORS] = {8};  // ROI height for each sensor
-const uint8_t roiCenters[NUM_SENSORS] = {199};
-const uint32_t timingBudgets[NUM_SENSORS] = {10000};
+const uint8_t roiX[NUM_SENSORS] = { 8 };  // ROI width for each sensor
+const uint8_t roiY[NUM_SENSORS] = { 8 };  // ROI height for each sensor
+const uint8_t roiCenters[NUM_SENSORS] = { 199 };
+const uint32_t timingBudgets[NUM_SENSORS] = { 10000 };
 const VL53L1X::DistanceMode rangingModes[NUM_SENSORS] = {
   VL53L1X::Medium
 };
@@ -29,10 +29,7 @@ const VL53L1X::DistanceMode rangingModes[NUM_SENSORS] = {
 SemaphoreHandle_t sensorMutex;
 
 uint32_t makeCANMsgID(uint8_t deviceID, uint8_t manufacturerID, uint16_t apiID, uint8_t deviceNumber) {
-  return ((uint32_t)(deviceID) << 24) |
-         ((uint32_t)(manufacturerID) << 16) |
-         ((uint32_t)(apiID & 0x3FF) << 6) |
-         (deviceNumber & 0x3F);
+  return ((uint32_t)(deviceID) << 24) | ((uint32_t)(manufacturerID) << 16) | ((uint32_t)(apiID & 0x3FF) << 6) | (deviceNumber & 0x3F);
 }
 
 void TaskSensorRead(void* pvParams) {
@@ -41,13 +38,12 @@ void TaskSensorRead(void* pvParams) {
     for (int i = 0; i < NUM_SENSORS; i++) {
       int dist = sensors[i].read();
       if (sensors[i].timeoutOccurred() || dist <= 0 || dist > 4000) {
-          dist = 0;
-          }
+        dist = 0;
+      }
       sensorDistances[i] = dist;
-
     }
     xSemaphoreGive(sensorMutex);
-    vTaskDelay(pdMS_TO_TICKS(3));  
+    vTaskDelay(pdMS_TO_TICKS(3));
   }
 }
 
@@ -83,25 +79,26 @@ void TaskCANTx(void* pvParams) {
     xSemaphoreTake(sensorMutex, portMAX_DELAY);
     for (int i = 0; i < NUM_SENSORS; i++) {
       int dist = sensorDistances[i];
-      uint32_t status = ssensors[i].ranging_data.range_status;
+      uint32_t status = sensors[i].ranging_data.range_status;
 
       uint8_t roiX = 0, roiY = 0;
       sensors[i].getROISize(&roiX, &roiY);
 
       twai_message_t msg = {};
-      msg.identifier = makeCANMsgID(DEVICE_ID, MANUFACTURER_ID, SENSOR_BASE_API_ID + i, DEVICE_NUMBER);
+      msg.identifier = makeCANMsgID(DEVICE_ID, MANUFACTURER_ID, SENSOR_BASE_API_ID, DEVICE_NUMBER);
       msg.extd = 1;
       msg.data_length_code = 8;
 
-      msg.data[0] = (dist >> 8) & 0xFF;             // Distance high byte
-      msg.data[1] = dist & 0xFF;                    // Distance low byte
-      msg.data[2] = sensors[i].getDistanceMode();   // Ranging mode
-      msg.data[3] = sensors[i].getROICenter();      // ROI center
-      msg.data[4] = roiX;                           // ROI width
-      msg.data[5] = roiY;                           // ROI height
-      msg.data[6] = status;               //Status
+      msg.data[0] = (dist >> 8) & 0xFF;            // Distance high byte
+      msg.data[1] = dist & 0xFF;                   // Distance low byte
+      msg.data[2] = sensors[i].getDistanceMode();  // Ranging mode
+      msg.data[3] = sensors[i].getROICenter();     // ROI center
+      msg.data[4] = roiX;                          // ROI width
+      msg.data[5] = roiY;                          // ROI height
+      msg.data[6] = status;                        //Status
 
-      twai_transmit(&msg, pdMS_TO_TICKS(1));
+      //twai_transmit(&msg, pdMS_TO_TICKS(1));
+     Serial.println(twai_transmit(&msg, pdMS_TO_TICKS(1)));
     }
     xSemaphoreGive(sensorMutex);
     vTaskDelay(pdMS_TO_TICKS(3));
@@ -122,10 +119,10 @@ void TaskCANRx(void* pvParams) {
 
     for (int i = 0; i < NUM_SENSORS; i++) {
       if (apiId == SENSOR_CONFIG_API_ID + i) {
-        uint8_t newMode   = msg.data[0];
+        uint8_t newMode = msg.data[0];
         uint8_t newCenter = msg.data[1];
-        uint8_t newRoiX   = (msg.data_length_code >= 4) ? msg.data[2] : 0;
-        uint8_t newRoiY   = (msg.data_length_code >= 4) ? msg.data[3] : 0;
+        uint8_t newRoiX = (msg.data_length_code >= 4) ? msg.data[2] : 0;
+        uint8_t newRoiY = (msg.data_length_code >= 4) ? msg.data[3] : 0;
 
         if (newMode > 2) {
           Serial.printf("[CAN RX] Invalid mode (%d) for sensor %d, ignoring.\n", newMode, i);
@@ -139,7 +136,7 @@ void TaskCANRx(void* pvParams) {
 
         xSemaphoreTake(sensorMutex, portMAX_DELAY);
         sensors[i].setDistanceMode((VL53L1X::DistanceMode)newMode);
-        
+
         if (newRoiX && newRoiY) {
           sensors[i].setROISize(newRoiX, newRoiY);
         }
@@ -155,14 +152,21 @@ void TaskCANRx(void* pvParams) {
 
 void setup() {
   Serial.begin(115200);
-  Wire.begin(8,9,40000);
+  Wire.begin(8, 9, 40000);
 
-  // Initialize CAN on GPIO 4 (TX) and GPIO 5 (RX)
   twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(GPIO_NUM_21, GPIO_NUM_20, TWAI_MODE_NORMAL);
   twai_timing_config_t t_config = TWAI_TIMING_CONFIG_1MBITS();
   twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
   twai_driver_install(&g_config, &t_config, &f_config);
   twai_start();
+
+  int i = 0;
+
+  if (!sensors[i].init()) {
+    Serial.printf("Sensor %d failed to initialize!\n", i);
+    while (1)
+      ;
+  }
 
 
   delay(100);  // Ensure all sensors are off
@@ -171,12 +175,9 @@ void setup() {
     delay(300);
 
 
-    if (!sensors[i].init()) {
-      Serial.printf("Sensor %d failed to initialize!\n", i);
-      while (1);
-    }
 
-    sensors[i].setROISize(roiX[i], roiY[i]); 
+
+    sensors[i].setROISize(roiX[i], roiY[i]);
     sensors[i].setROICenter(roiCenters[i]);
     sensors[i].setDistanceMode(rangingModes[i]);
     sensors[i].setMeasurementTimingBudget(timingBudgets[i]);
@@ -185,14 +186,13 @@ void setup() {
     sensors[i].startContinuous(13);
   }
 
-  Serial.println("Sensor0");
+  Serial.println("Sensor1");
 
   sensorMutex = xSemaphoreCreateMutex();
   xTaskCreatePinnedToCore(TaskSensorRead, "SensorRead", 4096, NULL, 1, NULL, 0);
   //xTaskCreatePinnedToCore(TaskSensorPrint, "SensorPrint", 4096, NULL, 1, NULL, 0);
   xTaskCreatePinnedToCore(TaskCANTx, "CANTx", 4096, NULL, 1, NULL, 0);
-  xTaskCreatePinnedToCore(TaskCANRx, "CANRx", 4096, NULL, 1, NULL, 0);
-
+  //xTaskCreatePinnedToCore(TaskCANRx, "CANRx", 4096, NULL, 1, NULL, 0);
 }
 
 void loop() {
